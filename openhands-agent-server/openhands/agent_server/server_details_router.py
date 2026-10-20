@@ -38,6 +38,8 @@ class ServerInfo(BaseModel):
     uptime: float
     idle_time: float
     title: str = "OpenHands Agent Server"
+    oidc_enabled: bool = False
+    oidc_authenticated: bool = False
 
     version: str = Field(
         default_factory=lambda: _package_version("openhands-agent-server")
@@ -170,8 +172,11 @@ def build_server_info(
 @server_details_router.get("/server_info")
 async def get_server_info(request: Request) -> ServerInfo:
     config = request.app.state.config
-    return build_server_info(
+    info = build_server_info(
         config.conversation_runtime,
         app_backend_ingress_url=config.app_backend_public_url,
         browser_available=configured_browser_available(config),
     )
+    info.oidc_enabled = bool(config.oidc_issuer_url)
+    info.oidc_authenticated = bool(request.scope.get("session", {}).get("oidc_user"))
+    return info

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 
 from openhands.agent_server.acp_router import acp_router
@@ -59,6 +60,7 @@ from openhands.agent_server.credential_binding import (
 from openhands.agent_server.dependencies import (
     check_session_api_key,
     check_workspace_session,
+    require_admin_for_shared_config,
 )
 from openhands.agent_server.event_service import ConversationRunLimitExceeded
 from openhands.agent_server.file_router import file_discovery_router, file_router
@@ -74,6 +76,7 @@ from openhands.agent_server.local_secret_resolver import local_secret_resolution
 from openhands.agent_server.mcp_router import mcp_router
 from openhands.agent_server.meta_profiles_router import meta_profiles_router
 from openhands.agent_server.middleware import CORSDispatcher
+from openhands.agent_server.oidc_router import oidc_router
 from openhands.agent_server.openai.router import (
     check_openai_api_key,
     openai_router,
@@ -558,6 +561,8 @@ def _add_api_routes(app: FastAPI) -> None:
     conversation_registry = app.state.conversation_registry
     app.include_router(server_details_router)
 
+    app.include_router(oidc_router)
+
     # The /api/init endpoint bypasses both the session-key auth and the
     # dormant gate. It has its own X-Init-API-Key auth. When
     # ``deferred_init`` is False the endpoints are still mounted but return
@@ -599,19 +604,25 @@ def _add_api_routes(app: FastAPI) -> None:
     api_router.include_router(hooks_router)
     api_router.include_router(llm_router)
     api_router.include_router(acp_router)
-    api_router.include_router(provider_connections_router)
-    api_router.include_router(mcp_router)
-    api_router.include_router(settings_router)
-    api_router.include_router(workspaces_router)
-    api_router.include_router(profiles_router)
-    api_router.include_router(agent_profiles_router)
-    api_router.include_router(meta_profiles_router)
+    admin_dependencies = [Depends(require_admin_for_shared_config)]
+    api_router.include_router(
+        provider_connections_router, dependencies=admin_dependencies
+    )
+    api_router.include_router(mcp_router, dependencies=admin_dependencies)
+    api_router.include_router(settings_router, dependencies=admin_dependencies)
+    api_router.include_router(workspaces_router, dependencies=admin_dependencies)
+    api_router.include_router(profiles_router, dependencies=admin_dependencies)
+    api_router.include_router(agent_profiles_router, dependencies=admin_dependencies)
+    api_router.include_router(meta_profiles_router, dependencies=admin_dependencies)
     # /api/auth/* mints workspace cookies and requires the header to bootstrap,
     # so it lives under the header-only auth group.
     api_router.include_router(auth_router)
     app.include_router(
         openai_router,
-        dependencies=[Depends(require_initialized), Depends(check_openai_api_key)],
+        dependencies=[
+            Depends(require_initialized),
+            Depends(check_openai_api_key),
+        ],
     )
 
     # Workspace static-file routes get their own auth group that accepts
@@ -884,6 +895,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         config = get_default_config()
     app = _create_fastapi_instance(config)
     app.state.config = config
+    if config.oidc_issuer_url:
+        assert config.secret_key is not None
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=config.secret_key.get_secret_value(),
+            session_cookie="oh_oidc_session",
+            max_age=60 * 60 * 8,
+            same_site="lax",
+            https_only=config.oidc_cookie_secure,
+        )
     app.state.conversation_registry = create_conversation_registry(config)
     app.state.canvas_extension_backend_manager = CanvasExtensionBackendManager()
     app.state.app_backend_session_store = AppBackendSessionStore()

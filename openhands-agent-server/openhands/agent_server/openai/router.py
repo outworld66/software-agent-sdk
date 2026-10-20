@@ -11,7 +11,10 @@ from pydantic import TypeAdapter, ValidationError
 
 from openhands.agent_server.config import Config
 from openhands.agent_server.conversation_service import ConversationService
-from openhands.agent_server.dependencies import get_conversation_service
+from openhands.agent_server.dependencies import (
+    check_oidc_csrf,
+    get_conversation_service,
+)
 from openhands.agent_server.openai.models import (
     OpenAIChatCompletionRequest,
     OpenAIChatCompletionResponse,
@@ -59,7 +62,11 @@ def check_openai_api_key(
     delivered via ``POST /api/init`` take effect immediately.
     """
     config: Config = request.app.state.config
-    if not config.session_api_keys:
+    if config.oidc_issuer_url and request.scope.get("session", {}).get("oidc_user"):
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            check_oidc_csrf(request)
+        return
+    if not config.session_api_keys and not config.oidc_issuer_url:
         return
     bearer_token = authorization.credentials if authorization else None
     if session_api_key in config.session_api_keys:

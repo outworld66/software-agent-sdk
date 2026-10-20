@@ -99,6 +99,14 @@ Create a JSON configuration file (default: `workspace/openhands_agent_server_con
 
 **Note**: Directory configuration (`working_dir`) will be handled at the conversation level rather than globally. These directories are specified when starting a conversation through the API.
 
+### Self-hosted OIDC and roles
+
+Set `OH_OIDC_ISSUER_URL`, `OH_OIDC_CLIENT_ID`, `OH_OIDC_CLIENT_SECRET`, and a persistent `OH_SECRET_KEY` of at least 32 characters to enable browser login. Serve Canvas and Agent Server from the same origin, and register `https://<public-host>/api/auth/oidc/callback` as the provider's redirect URI. The default groups claim is `groups`; set `OH_OIDC_ADMIN_GROUPS_0`, `OH_OIDC_ADMIN_GROUPS_1`, and so on to grant the `admin` role to matching group names. All other authenticated OIDC users receive the `user` role. The OIDC session cookie is secure by default; set `OH_OIDC_COOKIE_SECURE=false` only for local HTTP development.
+
+OIDC users can use the agent and conversations, and read redacted shared settings. The `admin` role, or a configured `OH_SESSION_API_KEYS_0` API key, is required to change shared settings and profiles, manage MCP servers or workspaces, or access secret values. API keys retain their existing behavior when OIDC is not configured. Keep the same `OH_SECRET_KEY` across restarts so sessions and encrypted settings remain valid.
+
+This first version does not isolate conversations, workspace files, or agent processes by user: users authenticated to one server still share those resources. Deploy it only where all signed-in users are trusted to see the same workspace. For isolated multi-user data, run separate Agent Server instances until per-user storage and ownership are implemented.
+
 ### Telemetry
 
 The agent server can emit a small set of **product-analytics** events to PostHog.

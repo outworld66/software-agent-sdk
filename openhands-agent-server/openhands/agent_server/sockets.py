@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import (
@@ -149,8 +150,27 @@ async def _accept_authenticated_websocket(
     config = _get_config(websocket)
     resolved_key = _resolve_websocket_session_api_key(websocket, session_api_key)
 
+    if config.oidc_issuer_url:
+        user = websocket.scope.get("session", {}).get("oidc_user")
+        if user:
+            origin = websocket.headers.get("origin")
+            host = websocket.headers.get(
+                "x-forwarded-host", websocket.headers.get("host", "")
+            )
+            parsed_origin = urlsplit(origin or "")
+            if (
+                parsed_origin.scheme in {"http", "https"}
+                and parsed_origin.netloc == host.split(",", 1)[0]
+                and not parsed_origin.path
+            ):
+                await websocket.accept()
+                return True
+        if not config.session_api_keys and not resolved_key:
+            await websocket.close(code=4001, reason="Authentication failed")
+            return False
+
     # No auth configured — accept unconditionally.
-    if not config.session_api_keys:
+    if not config.session_api_keys and not config.oidc_issuer_url:
         await websocket.accept()
         return True
 

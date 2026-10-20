@@ -253,6 +253,24 @@ class Config(BaseModel):
             "old key is removed from the list. "
         ),
     )
+    oidc_issuer_url: str | None = Field(
+        default=None,
+        description="OpenID Connect issuer URL. Enables browser login when set.",
+    )
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_admin_groups: list[str] = Field(
+        default_factory=list,
+        description="OIDC groups that grant the admin role.",
+    )
+    oidc_groups_claim: str = "groups"
+    oidc_cookie_secure: bool = Field(
+        default=True,
+        description=(
+            "Set Secure on OIDC session cookies; disable only for "
+            "local HTTP development."
+        ),
+    )
     allow_cors_origins: list[str] = Field(
         default_factory=list,
         description=(
@@ -529,6 +547,24 @@ class Config(BaseModel):
         config = handler(data)
         if isinstance(data, dict) and _is_blank_secret(data.get("secret_key")):
             config._secret_key_was_blank = True
+        if config.oidc_issuer_url:
+            if not config.oidc_client_id or not config.oidc_client_id.strip():
+                raise ValueError("OIDC requires oidc_client_id")
+            if (
+                not config.oidc_client_secret
+                or not config.oidc_client_secret.get_secret_value().strip()
+            ):
+                raise ValueError("OIDC requires oidc_client_secret")
+            if (
+                not config.secret_key
+                or config.secret_key_was_blank
+                or "secret_key" not in config.model_fields_set
+                or len(config.secret_key.get_secret_value()) < 32
+            ):
+                raise ValueError(
+                    "OIDC requires an explicit OH_SECRET_KEY with at least "
+                    "32 characters"
+                )
         return config
 
     @property

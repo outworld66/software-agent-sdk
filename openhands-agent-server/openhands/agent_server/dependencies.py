@@ -1,3 +1,4 @@
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import Depends, HTTPException, Request, status
@@ -35,8 +36,62 @@ def check_session_api_key(
     restarting the server or re-registering routes.
     """
     config: Config = request.app.state.config
+    if session_api_key and session_api_key in config.session_api_keys:
+        request.state.auth_roles = ["admin"]
+        return
+    if config.oidc_issuer_url:
+        user = request.scope.get("session", {}).get("oidc_user")
+        if not user:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+        request.state.auth_roles = request.scope["session"].get("oidc_roles", ["user"])
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            check_oidc_csrf(request)
+        return
     if config.session_api_keys and session_api_key not in config.session_api_keys:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+
+
+def check_oidc_csrf(request: Request) -> None:
+    config: Config = request.app.state.config
+    origin = request.headers.get("origin")
+    if not origin:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Origin required for cookie auth"
+        )
+    parsed_origin = urlsplit(origin)
+    origin_value = f"{parsed_origin.scheme}://{parsed_origin.netloc}"
+    forwarded_host = request.headers.get(
+        "x-forwarded-host", request.headers.get("host", "")
+    )
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    expected_origin = f"{forwarded_proto.split(',')[0].strip()}://{forwarded_host.split(',')[0].strip()}"
+    if (
+        origin_value != expected_origin
+        and origin_value not in config.allow_cors_origins
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid request origin")
+
+
+def require_admin(request: Request) -> None:
+    """Restrict shared server configuration to API-key or OIDC administrators."""
+    config: Config = request.app.state.config
+    if config.oidc_issuer_url and "admin" not in getattr(
+        request.state, "auth_roles", []
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin role required")
+
+
+def require_admin_for_shared_config(request: Request) -> None:
+    """Allow redacted settings reads; reserve writes and secrets for admins."""
+    path = request.url.path
+    sensitive_read = (
+        path.startswith("/api/mcp")
+        or "/settings/secrets" in path
+        or request.headers.get("x-expose-secrets") is not None
+    )
+    if request.method in {"GET", "HEAD", "OPTIONS"} and not sensitive_read:
+        return
+    require_admin(request)
 
 
 def check_workspace_session(
@@ -55,7 +110,9 @@ def check_workspace_session(
     to this router only; no other endpoint honors it.
     """
     config: Config = request.app.state.config
-    if not config.session_api_keys:
+    if config.oidc_issuer_url and request.scope.get("session", {}).get("oidc_user"):
+        return
+    if not config.session_api_keys and not config.oidc_issuer_url:
         return
     for candidate in (header_key, cookie_key):
         if candidate and candidate in config.session_api_keys:

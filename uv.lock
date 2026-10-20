@@ -2803,6 +2803,7 @@ source = { editable = "openhands-agent-server" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "authlib" },
     { name = "docker" },
     { name = "fastapi" },
     { name = "openai" },
@@ -2824,6 +2825,7 @@ posthog = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.13" },
+    { name = "authlib", specifier = ">=1.6.3" },
     { name = "docker", specifier = ">=7.1,<8" },
     { name = "fastapi", specifier = ">=0.104" },
     { name = "openai", specifier = ">=2.33.0,<3" },

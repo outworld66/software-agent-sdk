@@ -67,6 +67,8 @@ export interface ServerInfo {
   uptime: number;
   idle_time: number;
   title?: string;
+  oidc_enabled?: boolean;
+  oidc_authenticated?: boolean;
   version: string;
   sdk_version?: string;
   tools_version?: string;
