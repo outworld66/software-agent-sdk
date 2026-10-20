@@ -34,6 +34,7 @@ from openhands.agent_server._secret_redaction import (
 from openhands.agent_server.config import Config
 from openhands.agent_server.models import FileUploadResult, Success
 from openhands.agent_server.server_details_router import update_last_execution_time
+from openhands.agent_server.user_isolation import oidc_owner, user_workspace
 from openhands.sdk.git.exceptions import GitCommandError, GitRepositoryError
 from openhands.sdk.git.utils import (
     GIT_EMPTY_TREE_HASH,
@@ -821,6 +822,7 @@ def _list_root_locations() -> list[FileBrowserEntry]:
 
 @file_discovery_router.get("/home")
 async def get_home_directory(
+    request: Request,
     include_hidden: Annotated[
         bool,
         Query(description="Include hidden top-level directories in `favorites`"),
@@ -834,6 +836,15 @@ async def get_home_directory(
     when ``include_hidden`` is True. ``locations`` is the set of filesystem
     roots — '/' on POSIX or available drive letters on Windows.
     """
+    owner = oidc_owner(request)
+    if owner is not None and "admin" not in getattr(request.state, "auth_roles", []):
+        workspace = user_workspace(request.app.state.config, owner)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return HomeResponse(
+            home=str(workspace),
+            favorites=[FileBrowserEntry(label="Workspace", path=str(workspace))],
+            locations=[FileBrowserEntry(label="Workspace", path=str(workspace))],
+        )
     home = Path.home()
     return HomeResponse(
         home=str(home),

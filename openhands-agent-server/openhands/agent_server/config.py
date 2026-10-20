@@ -263,6 +263,10 @@ class Config(BaseModel):
         default_factory=list,
         description="OIDC groups that grant the admin role.",
     )
+    oidc_allowed_groups: list[str] = Field(
+        default_factory=list,
+        description="When set, only OIDC users in one of these groups may sign in.",
+    )
     oidc_groups_claim: str = "groups"
     oidc_cookie_secure: bool = Field(
         default=True,
@@ -548,6 +552,10 @@ class Config(BaseModel):
         if isinstance(data, dict) and _is_blank_secret(data.get("secret_key")):
             config._secret_key_was_blank = True
         if config.oidc_issuer_url:
+            if config.conversation_runtime != "docker":
+                raise ValueError(
+                    "OIDC user isolation requires OH_CONVERSATION_RUNTIME=docker"
+                )
             if not config.oidc_client_id or not config.oidc_client_id.strip():
                 raise ValueError("OIDC requires oidc_client_id")
             if (

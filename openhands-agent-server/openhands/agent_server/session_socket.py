@@ -41,6 +41,7 @@ from openhands.agent_server.sockets import (
     _is_websocket_connected,
     _safe_close_websocket,
 )
+from openhands.agent_server.user_isolation import websocket_conversation_owner
 from openhands.sdk import Event, Message
 from openhands.sdk.agent.stream_context import (
     StreamAborted,
@@ -334,6 +335,11 @@ async def session_socket(
 
     logger.info("session_socket_connected: %s after_seq=%s", conversation_id, after_seq)
     conv_service = _get_conversation_service(websocket)
+    if not websocket_conversation_owner(websocket, conv_service, str(conversation_id)):
+        await _safe_close_websocket(
+            websocket, code=4004, reason="Conversation not found"
+        )
+        return
     try:
         event_service = await conv_service.get_event_service(conversation_id)
     except CredentialBindingActivationRequired:

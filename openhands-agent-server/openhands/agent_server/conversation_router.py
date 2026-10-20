@@ -54,6 +54,11 @@ from openhands.agent_server.models import (
     trim_conversation_response_skills,
 )
 from openhands.agent_server.persistence import get_llm_profile_store
+from openhands.agent_server.user_isolation import (
+    conversation_owner_filter,
+    oidc_owner,
+    user_workspace,
+)
 from openhands.sdk import LLM
 from openhands.sdk.conversation.state import ConversationExecutionStatus
 from openhands.sdk.conversation.types import (
@@ -70,6 +75,7 @@ from openhands.sdk.marketplace.registry import (
 from openhands.sdk.plugin import PluginFetchError
 from openhands.sdk.profiles.resolver import ProfileNotFound
 from openhands.sdk.tool.client_tool import ClientToolRegistrationError
+from openhands.sdk.workspace import LocalWorkspace
 
 
 conversation_catalog_router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -181,7 +187,11 @@ async def search_conversations(
 ) -> ConversationPage:
     """Search / List conversations"""
     page = await conversation_service.search_conversations(
-        page_id, limit, status, sort_order
+        page_id,
+        limit,
+        status,
+        sort_order,
+        owner_id=conversation_owner_filter(request),
     )
     if not include_skills:
         # ``model_copy`` rather than in-place mutation so we never
@@ -204,6 +214,7 @@ async def search_conversations(
 @conversation_catalog_router.get("/count", include_in_schema=False)
 @conversation_router.get("/count")
 async def count_conversations(
+    request: Request,
     status: Annotated[
         ConversationExecutionStatus | None,
         Query(title="Optional filter by conversation execution status"),
@@ -211,7 +222,9 @@ async def count_conversations(
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> int:
     """Count conversations matching the given filters"""
-    count = await conversation_service.count_conversations(status)
+    count = await conversation_service.count_conversations(
+        status, owner_id=conversation_owner_filter(request)
+    )
     return count
 
 
@@ -292,7 +305,9 @@ async def batch_get_conversations(
 ) -> list[ConversationInfo | None]:
     """Get a batch of up to 99 conversations given their ids, returning null
     for any missing item"""
-    conversations = await conversation_service.batch_get_conversations(ids)
+    conversations = await conversation_service.batch_get_conversations(
+        ids, owner_id=conversation_owner_filter(request)
+    )
     conversations = [
         _with_runtime_info(request, conversation) if conversation is not None else None
         for conversation in conversations
@@ -312,6 +327,7 @@ async def batch_get_conversations(
     "", responses={429: {"description": "Server conversation run capacity is full"}}
 )
 async def start_conversation(
+    http_request: Request,
     request: Annotated[
         StartConversationRequest, Body(examples=START_CONVERSATION_EXAMPLES)
     ],
@@ -339,8 +355,36 @@ async def start_conversation(
         metadata=x_openhands_observability_metadata,
         parent_span_context=x_openhands_observability_parent_span_context,
     )
+    owner = oidc_owner(http_request)
+    if owner is not None and "admin" not in getattr(
+        http_request.state, "auth_roles", []
+    ):
+        if request.conversation_id is not None:
+            existing_owner = conversation_service.get_conversation_owner(
+                request.conversation_id
+            )
+            if (
+                conversation_service.conversation_exists(request.conversation_id)
+                and existing_owner != owner
+            ):
+                raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+        if (
+            request.parent_conversation_id is not None
+            and conversation_service.get_conversation_owner(
+                request.parent_conversation_id
+            )
+            != owner
+        ):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Conversation not found")
+        workspace = user_workspace(http_request.app.state.config, owner)
+        workspace.mkdir(parents=True, exist_ok=True)
+        request = request.model_copy(
+            update={"workspace": LocalWorkspace(working_dir=workspace)}
+        )
     try:
         info, is_new = await conversation_service.start_conversation(request)
+        if is_new and owner is not None:
+            conversation_service.set_conversation_owner(info.id, owner)
     except (ProfileNotFound, AgentLaunchError, LaunchStoreError) as e:
         raise launch_http_exception(e) from e
     except ClientToolRegistrationError as e:
@@ -791,6 +835,7 @@ async def condense_conversation(
 )
 async def fork_conversation(
     conversation_id: UUID,
+    http_request: Request,
     request: Annotated[ForkConversationRequest, Body()] = ForkConversationRequest(),  # noqa: B008
     include_skills: Annotated[bool, Query(title=INCLUDE_SKILLS_PARAM_TITLE)] = False,
     conversation_service: ConversationService = Depends(get_conversation_service),
@@ -823,6 +868,9 @@ async def fork_conversation(
             status.HTTP_404_NOT_FOUND,
             detail="Source conversation not found",
         )
+    owner = oidc_owner(http_request)
+    if owner is not None:
+        conversation_service.set_conversation_owner(info.id, owner)
     if not include_skills:
         info = trim_conversation_response_skills(info)
     return info
@@ -839,6 +887,7 @@ async def fork_conversation(
 )
 async def start_child_conversation(
     conversation_id: UUID,
+    http_request: Request,
     request: Annotated[StartChildConversationRequest, Body()],
     conversation_service: ConversationService = Depends(get_conversation_service),
 ) -> StartChildConversationResponse:
@@ -861,6 +910,9 @@ async def start_child_conversation(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, detail="Parent conversation not found"
         )
+    owner = oidc_owner(http_request)
+    if owner is not None:
+        conversation_service.set_conversation_owner(result.conversation_id, owner)
     return result
 
 

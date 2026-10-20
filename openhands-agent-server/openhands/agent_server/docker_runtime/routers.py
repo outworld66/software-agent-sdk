@@ -39,6 +39,11 @@ from openhands.agent_server.models import (
     UpdateSecretsRequest,
 )
 from openhands.agent_server.persistence import PersistedSettings, get_settings_store
+from openhands.agent_server.user_isolation import (
+    oidc_owner,
+    user_workspace,
+    websocket_conversation_owner,
+)
 from openhands.agent_server.utils import safe_rmtree
 from openhands.sdk.launch import AgentLaunchError, LaunchStoreError, ResolvedLaunch
 from openhands.sdk.logger import get_logger
@@ -127,6 +132,45 @@ async def start_conversation(
         raise HTTPException(400, "Invalid JSON body") from exc
     if not isinstance(body, dict):
         raise HTTPException(422, "Expected a JSON object")
+    registry = get_registry(request)
+
+    owner = oidc_owner(request)
+    if owner is not None and "admin" not in getattr(request.state, "auth_roles", []):
+        requested_id = body.get("conversation_id")
+        if requested_id:
+            try:
+                requested_uuid = UUID(str(requested_id))
+            except ValueError as exc:
+                raise HTTPException(400, "Invalid conversation_id") from exc
+            existing = (
+                registry.conversation_dir(requested_uuid)
+                .joinpath("meta.json")
+                .is_file()
+            )
+            if (
+                existing
+                and get_conversation_service(request).get_conversation_owner(
+                    requested_uuid
+                )
+                != owner
+            ):
+                raise HTTPException(404, "Conversation not found")
+        parent_id = body.get("parent_conversation_id")
+        if parent_id:
+            try:
+                parent_owner = get_conversation_service(request).get_conversation_owner(
+                    str(parent_id)
+                )
+            except ValueError as exc:
+                raise HTTPException(422, "Invalid parent_conversation_id") from exc
+            if parent_owner != owner:
+                raise HTTPException(404, "Conversation not found")
+        workspace_root = user_workspace(request.app.state.config, owner)
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        body["workspace"] = {
+            "kind": "LocalWorkspace",
+            "working_dir": str(workspace_root),
+        }
 
     workspace = body.get("workspace")
     if workspace is not None and (
@@ -146,7 +190,6 @@ async def start_conversation(
     body["conversation_id"] = str(conversation_id)
     body["workspace"] = {"kind": "LocalWorkspace", "working_dir": "/workspace"}
 
-    registry = get_registry(request)
     # Only a conversation the container already created is left alone on
     # failure; a manifest from a failed earlier start is retried like a new one.
     try:
@@ -194,6 +237,10 @@ async def start_conversation(
         await get_conversation_service(request).refresh_persisted_conversation(
             conversation_id
         )
+        if owner is not None and not existing:
+            get_conversation_service(request).set_conversation_owner(
+                conversation_id, owner
+            )
     return JSONResponse(content=content, status_code=response.status_code)
 
 
@@ -307,6 +354,9 @@ async def delete_conversation(conversation_id: UUID, request: Request) -> Respon
         await registry.stop(conversation_id)
         registry.provisioning.manifest_path(conversation_id).unlink(missing_ok=True)
         registry.archived_marker(conversation_id).unlink(missing_ok=True)
+        get_conversation_service(request).conversation_owner_path(
+            conversation_id
+        ).unlink(missing_ok=True)
         await asyncio.to_thread(
             safe_rmtree, registry.provisioning.runtime_dir(conversation_id)
         )
@@ -423,6 +473,11 @@ async def _proxy_socket(
     registry = websocket.app.state.conversation_registry
     if not isinstance(registry, DockerConversationRegistry):
         await websocket.close(code=1011)
+        return
+    if not websocket_conversation_owner(
+        websocket, websocket.app.state.conversation_service, str(conversation_id)
+    ):
+        await websocket.close(code=4004, reason="Conversation not found")
         return
     try:
         container = await _container(registry, conversation_id)

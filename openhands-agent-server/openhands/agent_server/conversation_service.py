@@ -607,6 +607,39 @@ class ConversationService:
             record.base_state_path = path
         return path
 
+    def get_conversation_owner(self, conversation_id: UUID | str) -> str | None:
+        """Read the immutable OIDC owner marker; missing markers are legacy data."""
+        marker = self.conversation_owner_path(UUID(str(conversation_id)))
+        if marker.is_symlink() or not marker.is_file():
+            return None
+        value = json.loads(marker.read_text())
+        if not isinstance(value, dict):
+            return None
+        owner = value.get("owner")
+        return owner if isinstance(owner, str) else None
+
+    def conversation_exists(self, conversation_id: UUID) -> bool:
+        return (
+            self._has_conversation(conversation_id)
+            or (self.conversations_dir / conversation_id.hex / "meta.json").is_file()
+        )
+
+    def set_conversation_owner(self, conversation_id: UUID, owner: str) -> None:
+        """Assign ownership once, without ever reassigning an existing conversation."""
+        marker = self.conversation_owner_path(conversation_id)
+        marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        marker.parent.chmod(0o700)
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"owner": owner}, handle)
+
+    def conversation_owner_path(self, conversation_id: UUID) -> Path:
+        return (
+            self.conversations_dir.parent
+            / ".conversation-owners"
+            / (f"{conversation_id.hex}.json")
+        )
+
     def _cipher_for(self, conversation_id: UUID) -> Cipher | None:
         if self.runtime_cipher_resolver is not None:
             return self.runtime_cipher_resolver(conversation_id)
@@ -1114,12 +1147,14 @@ class ConversationService:
         limit: int = 100,
         execution_status: ConversationExecutionStatus | None = None,
         sort_order: ConversationSortOrder = ConversationSortOrder.CREATED_AT_DESC,
+        owner_id: str | None = None,
     ) -> ConversationPage:
         items, next_page_id = await self._search_conversations(
             page_id=page_id,
             limit=limit,
             execution_status=execution_status,
             sort_order=sort_order,
+            owner_id=owner_id,
         )
         return ConversationPage(
             items=items,
@@ -1132,12 +1167,14 @@ class ConversationService:
         limit: int = 100,
         execution_status: ConversationExecutionStatus | None = None,
         sort_order: ConversationSortOrder = ConversationSortOrder.CREATED_AT_DESC,
+        owner_id: str | None = None,
     ) -> ConversationPage:
         items, next_page_id = await self._search_conversations(
             page_id=page_id,
             limit=limit,
             execution_status=execution_status,
             sort_order=sort_order,
+            owner_id=owner_id,
         )
         return ConversationPage(
             items=items,
@@ -1150,6 +1187,7 @@ class ConversationService:
         limit: int,
         execution_status: ConversationExecutionStatus | None,
         sort_order: ConversationSortOrder,
+        owner_id: str | None = None,
     ) -> tuple[list[ConversationInfo], str | None]:
         if self._event_services is None:
             raise ValueError("inactive_service")
@@ -1166,6 +1204,8 @@ class ConversationService:
             (conversation_id, record)
             for conversation_id, record in self._conversation_records.items()
             if execution_status is None or record.execution_status == execution_status
+            if owner_id is None
+            or self.get_conversation_owner(conversation_id) == owner_id
         ]
         if sort_order in (
             ConversationSortOrder.CREATED_AT,
@@ -1206,12 +1246,16 @@ class ConversationService:
     async def count_conversations(
         self,
         execution_status: ConversationExecutionStatus | None = None,
+        owner_id: str | None = None,
     ) -> int:
-        return await self._count_conversations(execution_status=execution_status)
+        return await self._count_conversations(
+            execution_status=execution_status, owner_id=owner_id
+        )
 
     async def _count_conversations(
         self,
         execution_status: ConversationExecutionStatus | None,
+        owner_id: str | None = None,
     ) -> int:
         """Count conversations matching the given filters."""
         if self._event_services is None:
@@ -1219,17 +1263,26 @@ class ConversationService:
         await self._reconcile_active_records()
 
         if execution_status is None:
-            return len(self._conversation_records)
+            return sum(
+                1
+                for conversation_id in self._conversation_records
+                if owner_id is None
+                or self.get_conversation_owner(conversation_id) == owner_id
+            )
 
         await self._refresh_execution_statuses()
         return sum(
             1
-            for record in self._conversation_records.values()
+            for conversation_id, record in self._conversation_records.items()
             if record.execution_status == execution_status
+            and (
+                owner_id is None
+                or self.get_conversation_owner(conversation_id) == owner_id
+            )
         )
 
     async def batch_get_conversations(
-        self, conversation_ids: list[UUID]
+        self, conversation_ids: list[UUID], owner_id: str | None = None
     ) -> list[ConversationInfo | None]:
         """Given a list of ids, get a batch of conversation info, returning
         None for any that were not found."""
@@ -1239,6 +1292,13 @@ class ConversationService:
                 for conversation_id in conversation_ids
             ]
         )
+        if owner_id is not None:
+            results = [
+                result
+                if result is None or self.get_conversation_owner(result.id) == owner_id
+                else None
+                for result in results
+            ]
         return results
 
     async def batch_get_acp_conversations(
@@ -1826,6 +1886,7 @@ class ConversationService:
                 event_service.conversation_dir,
                 f"conversation directory for {conversation_id}",
             )
+            self.conversation_owner_path(conversation_id).unlink(missing_ok=True)
             worktree_dir = self._worktree_dir(event_service.stored)
             # Forks share their source's worktree; the last one deleted removes it.
             if worktree_dir is not None and not any(

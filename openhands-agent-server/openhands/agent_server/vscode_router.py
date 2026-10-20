@@ -1,8 +1,9 @@
 """VSCode router for agent server API endpoints."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from openhands.agent_server.user_isolation import oidc_owner, user_workspace
 from openhands.agent_server.vscode_service import get_vscode_service
 from openhands.sdk.logger import get_logger
 
@@ -19,8 +20,8 @@ class VSCodeUrlResponse(BaseModel):
 
 
 @vscode_router.get("/url", response_model=VSCodeUrlResponse)
-async def get_vscode_url(
-    base_url: str | None = None, workspace_dir: str = "workspace"
+async def get_authenticated_vscode_url(
+    request: Request, base_url: str | None = None, workspace_dir: str = "workspace"
 ) -> VSCodeUrlResponse:
     """Get the VSCode URL with authentication token.
 
@@ -35,6 +36,16 @@ async def get_vscode_url(
     Returns:
         VSCode URL with token if available, None otherwise
     """
+    owner = oidc_owner(request)
+    if owner is not None and "admin" not in getattr(request.state, "auth_roles", []):
+        workspace_dir = str(user_workspace(request.app.state.config, owner))
+    return await get_vscode_url(base_url, workspace_dir)
+
+
+async def get_vscode_url(
+    base_url: str | None = None, workspace_dir: str = "workspace"
+) -> VSCodeUrlResponse:
+    """Build the URL for a server-selected workspace directory."""
     vscode_service = get_vscode_service()
     if vscode_service is None:
         raise HTTPException(

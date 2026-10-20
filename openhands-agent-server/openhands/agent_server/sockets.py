@@ -48,6 +48,7 @@ from openhands.agent_server.models import (
     ServerErrorEvent,
 )
 from openhands.agent_server.pub_sub import MaxSubscribersError, Subscriber
+from openhands.agent_server.user_isolation import websocket_conversation_owner
 from openhands.sdk import Event, Message
 from openhands.sdk.utils.paging import page_iterator
 
@@ -163,6 +164,9 @@ async def _accept_authenticated_websocket(
                 and parsed_origin.netloc == host.split(",", 1)[0]
                 and not parsed_origin.path
             ):
+                websocket.scope["auth_roles"] = websocket.scope["session"].get(
+                    "oidc_roles", ["user"]
+                )
                 await websocket.accept()
                 return True
         if not config.session_api_keys and not resolved_key:
@@ -181,6 +185,7 @@ async def _accept_authenticated_websocket(
                 "session_api_key passed via query param or header is deprecated. "
                 "Use first-message auth instead."
             )
+            websocket.scope["auth_roles"] = ["admin"]
             await websocket.accept()
             return True
         logger.warning("WebSocket authentication failed: invalid API key")
@@ -242,6 +247,7 @@ async def _accept_authenticated_websocket(
         return False
 
     logger.info("WebSocket authenticated via first-message auth")
+    websocket.scope["auth_roles"] = ["admin"]
     return True
 
 
@@ -303,6 +309,9 @@ async def events_socket(
 
     logger.info(f"Event Websocket Connected: {conversation_id}")
     conv_service = _get_conversation_service(websocket)
+    if not websocket_conversation_owner(websocket, conv_service, str(conversation_id)):
+        await websocket.close(code=4004, reason="Conversation not found")
+        return
     try:
         event_service = await conv_service.get_event_service(conversation_id)
     except CredentialBindingActivationRequired:
@@ -438,6 +447,9 @@ async def bash_events_socket(
         resend_all: DEPRECATED. Use resend_mode='all' instead.
     """
     if not await _accept_authenticated_websocket(websocket, session_api_key):
+        return
+    if "user" in websocket.scope.get("auth_roles", []):
+        await websocket.close(code=4003, reason="Administrator access required")
         return
 
     bash_service = _get_bash_event_service(websocket)

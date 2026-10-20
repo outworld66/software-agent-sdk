@@ -92,6 +92,10 @@ async def oidc_callback(request: Request):
     groups: Any = userinfo.get(config.oidc_groups_claim, [])
     if not isinstance(groups, list):
         groups = []
+    if config.oidc_allowed_groups and not set(config.oidc_allowed_groups).intersection(
+        str(group) for group in groups
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "User is not allowed")
     roles = ["user"]
     if set(config.oidc_admin_groups).intersection(str(group) for group in groups):
         roles.append("admin")

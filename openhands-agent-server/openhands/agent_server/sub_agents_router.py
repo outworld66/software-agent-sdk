@@ -6,13 +6,15 @@ catalog is discovered, not mutated. Named ``sub_agents`` to distinguish these
 delegate agents from the top-level agent and ``agent_profiles``.
 """
 
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from openhands.agent_server.config import Config
 from openhands.agent_server.launch import configured_browser_available
+from openhands.agent_server.user_isolation import oidc_owner, user_workspace
 from openhands.sdk.context.condenser import CondenserBase
 from openhands.sdk.hooks.config import HookConfig
 from openhands.sdk.mcp.config import MCPServer
@@ -132,10 +134,26 @@ def get_sub_agents(
     it registers nothing into the conversation registry. Browser-only built-ins
     are left out when the server's config disables the browser.
     """
+    project_dir = request.project_dir
+    load_user = request.load_user
+    owner = oidc_owner(http_request)
+    if owner is not None and "admin" not in getattr(
+        http_request.state, "auth_roles", []
+    ):
+        root = user_workspace(http_request.app.state.config, owner)
+        if project_dir is not None:
+            candidate = Path(project_dir).resolve()
+            if candidate != root and not candidate.is_relative_to(root):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "Project directory is outside your workspace",
+                )
+        project_dir = str(root) if project_dir is None else project_dir
+        load_user = False
     discovered = discover_agents(
-        project_dir=request.project_dir,
+        project_dir=project_dir,
         include_project=request.load_project,
-        include_user=request.load_user,
+        include_user=load_user,
     )
     config: Config = http_request.app.state.config
     builtins = (

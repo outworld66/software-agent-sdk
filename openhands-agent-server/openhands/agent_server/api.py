@@ -60,6 +60,7 @@ from openhands.agent_server.credential_binding import (
 from openhands.agent_server.dependencies import (
     check_session_api_key,
     check_workspace_session,
+    require_admin,
     require_admin_for_shared_config,
 )
 from openhands.agent_server.event_service import ConversationRunLimitExceeded
@@ -113,6 +114,10 @@ from openhands.agent_server.telemetry.models import (
 from openhands.agent_server.telemetry.sanitizer import normalize_exception
 from openhands.agent_server.tool_preload_service import get_tool_preload_service
 from openhands.agent_server.tool_router import tool_router
+from openhands.agent_server.user_isolation import (
+    check_conversation_access,
+    check_user_file_access,
+)
 from openhands.agent_server.vscode_router import vscode_router
 from openhands.agent_server.vscode_service import get_vscode_service
 from openhands.agent_server.workspaces_router import workspaces_router
@@ -582,8 +587,12 @@ def _add_api_routes(app: FastAPI) -> None:
         # No-op for non-deferred deployments.
         Depends(require_initialized),
         Depends(check_session_api_key),
+        Depends(check_conversation_access),
+        Depends(check_user_file_access),
     ]
 
+    admin_dependencies = [Depends(require_admin_for_shared_config)]
+    full_admin_dependencies = [Depends(require_admin)]
     api_router = APIRouter(prefix="/api", dependencies=dependencies)
     api_router.include_router(file_discovery_router)
     # Collection routes must precede runtime catch-alls such as
@@ -593,18 +602,21 @@ def _add_api_routes(app: FastAPI) -> None:
     api_router.include_router(conversation_router)
     api_router.include_router(credential_binding_router)
     api_router.include_router(tool_router)
-    api_router.include_router(bash_router)
-    api_router.include_router(git_router)
+    api_router.include_router(
+        bash_router, dependencies=[Depends(require_admin_for_shared_config)]
+    )
+    api_router.include_router(git_router, dependencies=full_admin_dependencies)
     api_router.include_router(file_router)
     api_router.include_router(vscode_router)
-    api_router.include_router(skills_router)
+    api_router.include_router(skills_router, dependencies=full_admin_dependencies)
     api_router.include_router(sub_agents_router)
-    api_router.include_router(plugins_router)
-    api_router.include_router(canvas_extensions_router)
+    api_router.include_router(plugins_router, dependencies=full_admin_dependencies)
+    api_router.include_router(
+        canvas_extensions_router, dependencies=full_admin_dependencies
+    )
     api_router.include_router(hooks_router)
-    api_router.include_router(llm_router)
-    api_router.include_router(acp_router)
-    admin_dependencies = [Depends(require_admin_for_shared_config)]
+    api_router.include_router(llm_router, dependencies=full_admin_dependencies)
+    api_router.include_router(acp_router, dependencies=full_admin_dependencies)
     api_router.include_router(
         provider_connections_router, dependencies=admin_dependencies
     )
@@ -632,7 +644,11 @@ def _add_api_routes(app: FastAPI) -> None:
     # those requests.
     workspace_api_router = APIRouter(
         prefix="/api",
-        dependencies=[Depends(require_initialized), Depends(check_workspace_session)],
+        dependencies=[
+            Depends(require_initialized),
+            Depends(check_workspace_session),
+            Depends(check_conversation_access),
+        ],
     )
     workspace_api_router.include_router(conversation_registry.workspace_router)
     app.include_router(workspace_api_router)
@@ -640,7 +656,7 @@ def _add_api_routes(app: FastAPI) -> None:
 
     app.include_router(
         app_backend_bridge_router,
-        dependencies=[Depends(require_initialized)],
+        dependencies=[Depends(require_initialized), Depends(require_admin)],
     )
     app.include_router(
         conversation_registry.sockets_router,
