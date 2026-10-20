@@ -10,6 +10,7 @@ dependencies = [
   "authlib>=1.6.3",
   "docker>=7.1,<8",
   "fastapi>=0.104",
+  "itsdangerous>=2.2",
   "openhands-sdk",
   "openhands-tools",
   "openai>=2.33.0,<3",
