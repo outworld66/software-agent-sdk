@@ -459,13 +459,24 @@ class DockerConversationRegistry(ConversationRegistry):
                 ("--pids-limit", str(self.config.conversation_container_pids_limit))
             )
 
+        docker_security_options = execute_command(
+            ["docker", "info", "--format", "{{json .SecurityOptions}}"]
+        )
+        container_user = f"{os.getuid()}:{os.getgid()}"
+        if (
+            docker_security_options.returncode == 0
+            and '"name=rootless"' in docker_security_options.stdout
+        ):
+            # Rootless UID 0 maps to the daemon user that owns these mounts.
+            container_user = "0:0"
+
         command = [
             "docker",
             "run",
             "-d",
             "--rm",
             "--user",
-            f"{os.getuid()}:{os.getgid()}",
+            container_user,
             "--cap-drop",
             "ALL",
             "--security-opt",
