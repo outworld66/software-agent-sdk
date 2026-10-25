@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
@@ -263,8 +264,20 @@ async def start_conversation(
                                 )
                         if errors:
                             result["validation_errors"] = errors
+                        elif message:
+                            summary = message.splitlines()[0][:200]
+                            if re.search(
+                                r"api[_ -]?key|secret|token|password|credential|"
+                                r"input_value|bearer|sk-[A-Za-z0-9]{8,}|"
+                                r"https?://[^/\s:@]+:[^@\s]+@",
+                                summary,
+                                re.IGNORECASE,
+                            ):
+                                result["reason"] = "sensitive_message_redacted"
+                            else:
+                                result["message_summary"] = summary
                         else:
-                            result["reason"] = "other_agent_launch_error"
+                            result["reason"] = "empty_agent_launch_error"
                     for key in ("detail", "errors", "error"):
                         if key in value:
                             result[key] = validation_detail(value[key])
