@@ -231,15 +231,27 @@ async def start_conversation(
     content = response.json() if response.content else None
     if response.is_error:
         if response.status_code == 422:
+            def validation_detail(value):
+                if isinstance(value, list):
+                    return [validation_detail(item) for item in value]
+                if isinstance(value, dict):
+                    return {
+                        "keys": sorted(value),
+                        **{
+                            key: value[key]
+                            for key in ("loc", "msg", "type")
+                            if key in value
+                        },
+                        **{
+                            key: validation_detail(value[key])
+                            for key in ("detail", "errors", "error")
+                            if key in value
+                        },
+                    }
+                return type(value).__name__
+
             detail = content.get("detail") if isinstance(content, dict) else None
-            if isinstance(detail, list):
-                detail = [
-                    {key: error.get(key) for key in ("loc", "msg", "type")}
-                    for error in detail
-                    if isinstance(error, dict)
-                ]
-            else:
-                detail = type(detail).__name__
+            detail = validation_detail(detail)
             logger.warning("Conversation runtime rejected request (422): %s", detail)
         if not existing:
             await registry.stop(conversation_id)
