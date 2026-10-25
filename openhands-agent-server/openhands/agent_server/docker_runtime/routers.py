@@ -239,12 +239,18 @@ async def start_conversation(
                     for key in ("loc", "type", "code"):
                         if key in value:
                             result[key] = value[key]
-                    if value.get("message") == "The start request has no agent source":
-                        result["reason"] = "missing_agent_source"
-                    elif isinstance(value.get("message"), str) and value[
-                        "message"
-                    ].startswith("Invalid agent_settings:"):
-                        lines = value["message"].splitlines()
+                    message = value.get("message")
+                    safe_reasons = {
+                        "The start request has no agent source": "missing_agent_source",
+                        "agent_launch_additions.llm_profile_ref applies only to an "
+                        "OpenHands Agent Profile": (
+                            "llm_profile_ref_requires_openhands_profile"
+                        ),
+                    }
+                    if message in safe_reasons:
+                        result["reason"] = safe_reasons[message]
+                    elif isinstance(message, str):
+                        lines = message.splitlines()
                         errors = []
                         for index, line in enumerate(lines):
                             if "[type=" in line:
@@ -255,7 +261,10 @@ async def start_conversation(
                                         "type": error_type.split("]", 1)[0],
                                     }
                                 )
-                        result["agent_settings_errors"] = errors
+                        if errors:
+                            result["validation_errors"] = errors
+                        else:
+                            result["reason"] = "other_agent_launch_error"
                     for key in ("detail", "errors", "error"):
                         if key in value:
                             result[key] = validation_detail(value[key])
