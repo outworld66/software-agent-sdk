@@ -235,19 +235,31 @@ async def start_conversation(
                 if isinstance(value, list):
                     return [validation_detail(item) for item in value]
                 if isinstance(value, dict):
-                    return {
-                        "keys": sorted(value),
-                        **{
-                            key: value[key]
-                            for key in ("loc", "msg", "type")
-                            if key in value
-                        },
-                        **{
-                            key: validation_detail(value[key])
-                            for key in ("detail", "errors", "error")
-                            if key in value
-                        },
-                    }
+                    result = {"keys": sorted(value)}
+                    for key in ("loc", "type", "code"):
+                        if key in value:
+                            result[key] = value[key]
+                    if value.get("message") == "The start request has no agent source":
+                        result["reason"] = "missing_agent_source"
+                    elif isinstance(value.get("message"), str) and value[
+                        "message"
+                    ].startswith("Invalid agent_settings:"):
+                        lines = value["message"].splitlines()
+                        errors = []
+                        for index, line in enumerate(lines):
+                            if "[type=" in line:
+                                error_type = line.split("[type=", 1)[1].split(",", 1)[0]
+                                errors.append(
+                                    {
+                                        "loc": lines[index - 1].strip(),
+                                        "type": error_type.split("]", 1)[0],
+                                    }
+                                )
+                        result["agent_settings_errors"] = errors
+                    for key in ("detail", "errors", "error"):
+                        if key in value:
+                            result[key] = validation_detail(value[key])
+                    return result
                 return type(value).__name__
 
             detail = content.get("detail") if isinstance(content, dict) else None
