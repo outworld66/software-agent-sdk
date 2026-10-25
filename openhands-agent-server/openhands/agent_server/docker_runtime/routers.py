@@ -230,6 +230,17 @@ async def start_conversation(
 
     content = response.json() if response.content else None
     if response.is_error:
+        if response.status_code == 422:
+            detail = content.get("detail") if isinstance(content, dict) else None
+            if isinstance(detail, list):
+                detail = [
+                    {key: error.get(key) for key in ("loc", "msg", "type")}
+                    for error in detail
+                    if isinstance(error, dict)
+                ]
+            else:
+                detail = type(detail).__name__
+            logger.warning("Conversation runtime rejected request (422): %s", detail)
         if not existing:
             await registry.stop(conversation_id)
         content = {"detail": "Conversation runtime rejected the request"}
