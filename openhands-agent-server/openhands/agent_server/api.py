@@ -615,7 +615,7 @@ def _add_api_routes(app: FastAPI) -> None:
         canvas_extensions_router, dependencies=full_admin_dependencies
     )
     api_router.include_router(hooks_router)
-    api_router.include_router(llm_router, dependencies=full_admin_dependencies)
+    api_router.include_router(llm_router)
     api_router.include_router(acp_router, dependencies=full_admin_dependencies)
     api_router.include_router(
         provider_connections_router, dependencies=admin_dependencies

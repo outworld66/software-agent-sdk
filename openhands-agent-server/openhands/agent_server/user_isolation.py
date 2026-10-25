@@ -79,6 +79,17 @@ def websocket_conversation_owner(
     websocket: Any, service: Any, conversation_id: str
 ) -> bool:
     config: Config = websocket.app.state.config
+    session = websocket.scope.get("session", {})
+    user = session.get("oidc_user")
+    if config.oidc_issuer_url and isinstance(user, dict):
+        if "admin" in session.get("oidc_roles", []):
+            return True
+        try:
+            return service.get_conversation_owner(conversation_id) == owner_id(
+                config, user
+            )
+        except (AttributeError, OSError, ValueError):
+            return False
     key = websocket.query_params.get("session_api_key") or websocket.headers.get(
         "x-session-api-key"
     )
@@ -86,8 +97,6 @@ def websocket_conversation_owner(
         return True
     if "admin" in websocket.scope.get("auth_roles", []):
         return True
-    session = websocket.scope.get("session", {})
-    user = session.get("oidc_user")
     if not config.oidc_issuer_url or not isinstance(user, dict):
         return True
     if "admin" in session.get("oidc_roles", []):

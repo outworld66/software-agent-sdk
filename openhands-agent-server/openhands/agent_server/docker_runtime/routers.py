@@ -40,6 +40,12 @@ from openhands.agent_server.models import (
     UpdateSecretsRequest,
 )
 from openhands.agent_server.persistence import PersistedSettings, get_settings_store
+from openhands.agent_server.subscription_access import (
+    is_admin,
+    personal_auth_dir,
+    shared_grants,
+    user_sub,
+)
 from openhands.agent_server.user_isolation import (
     oidc_owner,
     user_workspace,
@@ -201,7 +207,24 @@ async def start_conversation(
         raise HTTPException(422, str(exc)) from exc
     try:
         payload, launched = await _prepare_forward(body, registry, existing=existing)
-        identity = registry.provisioning.create(conversation_id, host_workspace)
+        shared_auth = is_admin(request) or owner is None
+        if owner is not None and not shared_auth:
+            personal_credentials = personal_auth_dir(request) / "openai_oauth.json"
+            shared_auth = (
+                user_sub(request) in shared_grants(request.app.state.config)
+                and not personal_credentials.is_file()
+            )
+        identity = registry.provisioning.create(
+            conversation_id,
+            host_workspace,
+            auth_owner=owner,
+            shared_auth=shared_auth,
+        )
+        if identity.auth_owner != owner or identity.shared_auth != shared_auth:
+            identity = identity.model_copy(
+                update={"auth_owner": owner, "shared_auth": shared_auth}
+            )
+            registry.provisioning.save(identity)
         if launched is not None and identity.launched_agent_profile is None:
             identity = identity.model_copy(update={"launched_agent_profile": launched})
             registry.provisioning.save(identity)
@@ -232,6 +255,7 @@ async def start_conversation(
     content = response.json() if response.content else None
     if response.is_error:
         if response.status_code == 422:
+
             def validation_detail(value):
                 if isinstance(value, list):
                     return [validation_detail(item) for item in value]

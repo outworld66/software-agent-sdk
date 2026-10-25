@@ -6,11 +6,21 @@ import asyncio
 import secrets
 import time
 from dataclasses import dataclass
+from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from openhands.agent_server.subscription_access import (
+    auth_dir,
+    is_admin,
+    set_shared_grant,
+    shared_grants,
+    user_sub,
+)
+from openhands.agent_server.user_isolation import owner_id
+from openhands.sdk.llm.auth.credentials import CredentialStore
 from openhands.sdk.llm.auth.openai import (
     DEVICE_CODE_TIMEOUT_SECONDS,
     OPENAI_CODEX_MODELS,
@@ -35,6 +45,8 @@ class PendingDeviceLogin:
     device_code: DeviceCode
     expires_at: int
     epoch: int
+    user_sub: str
+    shared: bool
 
 
 _PENDING_OPENAI_DEVICE_LOGINS: dict[str, PendingDeviceLogin] = {}
@@ -68,6 +80,7 @@ class SubscriptionStatusResponse(BaseModel):
     connected: bool
     account_email: str | None = None
     expires_at: int | None = None
+    shared_available: bool = False
 
 
 class SubscriptionDeviceStartResponse(BaseModel):
@@ -94,8 +107,8 @@ class SubscriptionModelsResponse(BaseModel):
     models: list[str]
 
 
-def _get_openai_subscription_auth() -> OpenAISubscriptionAuth:
-    return OpenAISubscriptionAuth()
+def _get_openai_subscription_auth(directory) -> OpenAISubscriptionAuth:
+    return OpenAISubscriptionAuth(CredentialStore(directory))
 
 
 def _status_from_auth(auth: OpenAISubscriptionAuth) -> SubscriptionStatusResponse:
@@ -110,6 +123,27 @@ def _drop_expired_device_logins() -> None:
     for key, pending in list(_PENDING_OPENAI_DEVICE_LOGINS.items()):
         if pending.expires_at <= now:
             _PENDING_OPENAI_DEVICE_LOGINS.pop(key, None)
+
+
+async def _stop_runtimes(request: Request, *, shared: bool) -> None:
+    registry = getattr(request.app.state, "conversation_registry", None)
+    provisioning = getattr(registry, "provisioning", None)
+    if provisioning is None:
+        return
+    owner = owner_id(request.app.state.config, {"sub": user_sub(request)})
+    for path in provisioning.control_root.glob("*.json"):
+        try:
+            conversation_id = UUID(hex=path.stem)
+            identity = provisioning.load_optional(conversation_id)
+            matches = identity and (
+                identity.shared_auth
+                if shared
+                else identity.auth_owner == owner and not identity.shared_auth
+            )
+            if matches:
+                await registry.stop(conversation_id)
+        except (OSError, ValueError):
+            continue
 
 
 @llm_router.get("/providers", response_model=ProvidersResponse)
@@ -179,25 +213,50 @@ async def list_openai_subscription_models() -> SubscriptionModelsResponse:
 @llm_router.get(
     "/subscription/openai/status", response_model=SubscriptionStatusResponse
 )
-async def get_openai_subscription_status() -> SubscriptionStatusResponse:
+async def get_openai_subscription_status(
+    request: Request,
+) -> SubscriptionStatusResponse:
     """Return safe ChatGPT subscription connection state without tokens."""
-    auth = _get_openai_subscription_auth()
+    user_sub(request)
+    shared = is_admin(request)
+    auth = _get_openai_subscription_auth(auth_dir(request, shared))
     try:
         await auth.refresh_if_needed()
     except (RuntimeError, httpx.HTTPError):
         # A rejected refresh (RuntimeError) or an unreachable auth.openai.com
         # (httpx transport error) both leave no usable login right now.
-        return SubscriptionStatusResponse(connected=False)
-    return _status_from_auth(auth)
+        return SubscriptionStatusResponse(
+            connected=False,
+            shared_available=(
+                is_admin(request)
+                or user_sub(request) in shared_grants(request.app.state.config)
+            ),
+        )
+    result = _status_from_auth(auth)
+    return result.model_copy(
+        update={
+            "shared_available": is_admin(request)
+            or user_sub(request) in shared_grants(request.app.state.config)
+        }
+    )
 
 
 @llm_router.post(
     "/subscription/openai/device/start",
     response_model=SubscriptionDeviceStartResponse,
 )
-async def start_openai_subscription_device_login() -> SubscriptionDeviceStartResponse:
+async def start_openai_subscription_device_login(
+    request: Request, shared: bool | None = Query(default=None)
+) -> SubscriptionDeviceStartResponse:
     """Start ChatGPT device-code sign-in without returning tokens."""
-    auth = _get_openai_subscription_auth()
+    identity = user_sub(request)
+    shared = is_admin(request) if shared is None else shared
+    if shared and not is_admin(request):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only administrators can connect the shared account",
+        )
+    auth = _get_openai_subscription_auth(auth_dir(request, shared))
     challenge = await auth.start_device_login()
     token = secrets.token_urlsafe(32)
     expires_at = int(time.time() * 1000) + (DEVICE_CODE_TIMEOUT_SECONDS * 1000)
@@ -207,6 +266,8 @@ async def start_openai_subscription_device_login() -> SubscriptionDeviceStartRes
             device_code=challenge,
             expires_at=expires_at,
             epoch=_OPENAI_DEVICE_LOGIN_EPOCH,
+            user_sub=identity,
+            shared=shared,
         )
     return SubscriptionDeviceStartResponse(
         device_code=token,
@@ -222,6 +283,7 @@ async def start_openai_subscription_device_login() -> SubscriptionDeviceStartRes
 )
 async def poll_openai_subscription_device_login(
     request: SubscriptionDevicePollRequest,
+    http_request: Request,
 ) -> SubscriptionStatusResponse:
     """Poll a ChatGPT device-code sign-in without returning tokens."""
     async with _OPENAI_DEVICE_LOGIN_LOCK:
@@ -234,9 +296,19 @@ async def poll_openai_subscription_device_login(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Subscription device login not found or expired",
             )
+        if pending.user_sub != user_sub(http_request):
+            _PENDING_OPENAI_DEVICE_LOGINS[request.device_code] = pending
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "Subscription device login not found or expired",
+            )
+        if pending.shared and not is_admin(http_request):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "Administrator role required"
+            )
         _IN_FLIGHT_OPENAI_DEVICE_LOGINS.add(request.device_code)
 
-    auth = _get_openai_subscription_auth()
+    auth = _get_openai_subscription_auth(auth_dir(http_request, pending.shared))
     credentials = None
     try:
         credentials = await auth.poll_device_login(pending.device_code, persist=False)
@@ -255,21 +327,78 @@ async def poll_openai_subscription_device_login(
         if pending.epoch != current_epoch:
             return SubscriptionStatusResponse(connected=False)
         auth.save_credentials(credentials)
-        return SubscriptionStatusResponse(
-            connected=True, expires_at=credentials.expires_at
-        )
+    await _stop_runtimes(http_request, shared=pending.shared)
+    return SubscriptionStatusResponse(connected=True, expires_at=credentials.expires_at)
 
 
 @llm_router.post(
     "/subscription/openai/logout", response_model=SubscriptionStatusResponse
 )
-async def logout_openai_subscription() -> SubscriptionStatusResponse:
+async def logout_openai_subscription(
+    request: Request, shared: bool | None = Query(default=None)
+) -> SubscriptionStatusResponse:
     """Remove stored ChatGPT subscription credentials."""
-    global _OPENAI_DEVICE_LOGIN_EPOCH
-
-    auth = _get_openai_subscription_auth()
+    user_sub(request)
+    shared = is_admin(request) if shared is None else shared
+    if shared and not is_admin(request):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Only administrators can disconnect the shared account",
+        )
+    auth = _get_openai_subscription_auth(auth_dir(request, shared))
     async with _OPENAI_DEVICE_LOGIN_LOCK:
+        global _OPENAI_DEVICE_LOGIN_EPOCH
         _OPENAI_DEVICE_LOGIN_EPOCH += 1
-        _PENDING_OPENAI_DEVICE_LOGINS.clear()
+        for key, pending in list(_PENDING_OPENAI_DEVICE_LOGINS.items()):
+            if pending.user_sub == user_sub(request) and pending.shared == shared:
+                _PENDING_OPENAI_DEVICE_LOGINS.pop(key, None)
         auth.logout()
+    await _stop_runtimes(request, shared=shared)
     return SubscriptionStatusResponse(connected=False)
+
+
+class SharedGrantRequest(BaseModel):
+    sub: str = Field(min_length=1, max_length=512)
+    enabled: bool
+
+
+@llm_router.get("/subscription/openai/grants")
+async def list_openai_shared_grants(request: Request) -> dict[str, list[str]]:
+    if not is_admin(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    return {"users": shared_grants(request.app.state.config)}
+
+
+@llm_router.post("/subscription/openai/grants")
+async def update_openai_shared_grant(
+    body: SharedGrantRequest, request: Request
+) -> dict[str, list[str]]:
+    if not is_admin(request):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Administrator role required")
+    sub = body.sub.strip()
+    if not sub or any(ord(char) < 32 for char in sub):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid OIDC subject"
+        )
+    users = set_shared_grant(request.app.state.config, sub, body.enabled)
+    if not body.enabled:
+        registry = getattr(request.app.state, "conversation_registry", None)
+        provisioning = getattr(registry, "provisioning", None)
+        if provisioning is not None:
+            owner = owner_id(request.app.state.config, {"sub": sub})
+            for path in provisioning.control_root.glob("*.json"):
+                try:
+                    conversation_id = UUID(hex=path.stem)
+                    identity = provisioning.load_optional(conversation_id)
+                    if (
+                        identity
+                        and identity.auth_owner == owner
+                        and identity.shared_auth
+                    ):
+                        provisioning.save(
+                            identity.model_copy(update={"shared_auth": False})
+                        )
+                        await registry.stop(conversation_id)
+                except (OSError, ValueError):
+                    continue
+    return {"users": users}

@@ -169,6 +169,8 @@ async def _accept_authenticated_websocket(
                 )
                 await websocket.accept()
                 return True
+            await websocket.close(code=4001, reason="Authentication failed")
+            return False
         if not config.session_api_keys and not resolved_key:
             await websocket.close(code=4001, reason="Authentication failed")
             return False

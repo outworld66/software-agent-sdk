@@ -28,6 +28,7 @@ from openhands.agent_server.models import (
 from openhands.agent_server.persistence.store import _get_persistence_dir
 from openhands.agent_server.storage import Reclaimer
 from openhands.sdk.conversation.state import ConversationExecutionStatus
+from openhands.sdk.llm.auth.credentials import get_credentials_dir
 from openhands.sdk.logger import get_logger
 from openhands.sdk.utils.cipher import Cipher
 from openhands.sdk.utils.command import execute_command, sanitized_env
@@ -401,12 +402,40 @@ class DockerConversationRegistry(ConversationRegistry):
 
     def _build_container(self, conversation_id: UUID) -> ConversationContainer:
         identity = self.provisioning.load(conversation_id)
+        if identity.auth_owner is None and not identity.shared_auth:
+            conversation_owner = (
+                self._service.get_conversation_owner(conversation_id)
+                if self._service is not None
+                else None
+            )
+            identity = identity.model_copy(
+                update={
+                    "auth_owner": conversation_owner,
+                    "shared_auth": conversation_owner is None,
+                }
+            )
+            self.provisioning.save(identity)
         runtime_dir = self.provisioning.runtime_dir(conversation_id)
         persistence_dir = self.provisioning.direct_child(runtime_dir, "persistence")
+        auth_dir = (
+            get_credentials_dir()
+            if identity.shared_auth
+            else self.config.conversations_path.parent
+            / "users"
+            / (identity.auth_owner or "")
+            / "auth"
+        )
+        if not identity.shared_auth and not identity.auth_owner:
+            raise ValueError(
+                "Conversation runtime has no authenticated credential owner"
+            )
         conversation_dir = self.conversation_dir(conversation_id)
         workspace_dir = self.workspace_dir(conversation_id)
         for directory in (persistence_dir, conversation_dir, workspace_dir):
             directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        auth_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if auth_dir.is_symlink() or not auth_dir.is_dir():
+            raise ValueError("Subscription credential directory is unavailable")
 
         env = sanitized_env()
         env.update(
@@ -447,6 +476,7 @@ class DockerConversationRegistry(ConversationRegistry):
         for host, target in (
             (conversation_dir, f"{_CONVERSATIONS_DIR}/{conversation_id.hex}"),
             (persistence_dir, _PERSISTENCE_DIR),
+            (auth_dir, f"{_PERSISTENCE_DIR}/auth"),
             (workspace_dir, _WORKSPACE_DIR),
         ):
             flags.extend(("-v", f"{host}:{target}"))

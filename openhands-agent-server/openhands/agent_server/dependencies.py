@@ -36,11 +36,17 @@ def check_session_api_key(
     restarting the server or re-registering routes.
     """
     config: Config = request.app.state.config
+    user = request.scope.get("session", {}).get("oidc_user")
+    if config.oidc_issuer_url and user:
+        request.state.auth_roles = request.scope["session"].get("oidc_roles", ["user"])
+        request.state.oidc_user = user
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            check_oidc_csrf(request)
+        return
     if session_api_key and session_api_key in config.session_api_keys:
         request.state.auth_roles = ["admin"]
         return
     if config.oidc_issuer_url:
-        user = request.scope.get("session", {}).get("oidc_user")
         if not user:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED)
         request.state.auth_roles = request.scope["session"].get("oidc_roles", ["user"])
@@ -111,15 +117,15 @@ def check_workspace_session(
     to this router only; no other endpoint honors it.
     """
     config: Config = request.app.state.config
+    user = request.scope.get("session", {}).get("oidc_user")
+    if config.oidc_issuer_url and user:
+        request.state.auth_roles = request.scope["session"].get("oidc_roles", ["user"])
+        request.state.oidc_user = user
+        return
     for candidate in (header_key, cookie_key):
         if candidate and candidate in config.session_api_keys:
             request.state.auth_roles = ["admin"]
             return
-    if config.oidc_issuer_url and request.scope.get("session", {}).get("oidc_user"):
-        user = request.scope["session"]["oidc_user"]
-        request.state.auth_roles = request.scope["session"].get("oidc_roles", ["user"])
-        request.state.oidc_user = user
-        return
     if not config.session_api_keys and not config.oidc_issuer_url:
         return
     raise HTTPException(status.HTTP_401_UNAUTHORIZED)

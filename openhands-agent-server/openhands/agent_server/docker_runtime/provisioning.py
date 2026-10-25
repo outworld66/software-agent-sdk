@@ -27,6 +27,8 @@ class RuntimeIdentity(BaseModel):
     encryption_key: SecretStr
     workspace_path: Path
     launched_agent_profile: LaunchedAgentProfile | None = None
+    auth_owner: str | None = None
+    shared_auth: bool = False
 
     @field_serializer("api_key", "encryption_key")
     def serialize_key(self, value, info):
@@ -114,7 +116,12 @@ class RuntimeProvisioningStore:
         return identity
 
     def create(
-        self, conversation_id: UUID, workspace_path: Path | None = None
+        self,
+        conversation_id: UUID,
+        workspace_path: Path | None = None,
+        *,
+        auth_owner: str | None = None,
+        shared_auth: bool = False,
     ) -> RuntimeIdentity:
         path = self.manifest_path(conversation_id)
         with FileLock(str(path) + ".lock"):
@@ -159,6 +166,8 @@ class RuntimeProvisioningStore:
                 api_key=SecretStr(secrets.token_urlsafe(32)),
                 encryption_key=SecretStr(secrets.token_urlsafe(32)),
                 workspace_path=workspace_path,
+                auth_owner=auth_owner,
+                shared_auth=shared_auth,
             )
             self._save(identity)
             return identity
