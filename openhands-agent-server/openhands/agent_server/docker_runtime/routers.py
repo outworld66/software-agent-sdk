@@ -41,10 +41,7 @@ from openhands.agent_server.models import (
 )
 from openhands.agent_server.persistence import PersistedSettings, get_settings_store
 from openhands.agent_server.subscription_access import (
-    is_admin,
-    personal_auth_dir,
-    shared_grants,
-    user_sub,
+    credential_source,
 )
 from openhands.agent_server.user_isolation import (
     oidc_owner,
@@ -207,13 +204,7 @@ async def start_conversation(
         raise HTTPException(422, str(exc)) from exc
     try:
         payload, launched = await _prepare_forward(body, registry, existing=existing)
-        shared_auth = is_admin(request) or owner is None
-        if owner is not None and not shared_auth:
-            personal_credentials = personal_auth_dir(request) / "openai_oauth.json"
-            shared_auth = (
-                user_sub(request) in shared_grants(request.app.state.config)
-                and not personal_credentials.is_file()
-            )
+        shared_auth = credential_source(request) == "shared"
         identity = registry.provisioning.create(
             conversation_id,
             host_workspace,

@@ -14,7 +14,10 @@ from pydantic import BaseModel, Field
 
 from openhands.agent_server.subscription_access import (
     auth_dir,
+    can_use_shared,
+    credential_source,
     is_admin,
+    set_credential_source,
     set_shared_grant,
     shared_grants,
     user_sub,
@@ -81,6 +84,8 @@ class SubscriptionStatusResponse(BaseModel):
     account_email: str | None = None
     expires_at: int | None = None
     shared_available: bool = False
+    credential_source: str = "personal"
+    shared_connected: bool = False
 
 
 class SubscriptionDeviceStartResponse(BaseModel):
@@ -125,7 +130,9 @@ def _drop_expired_device_logins() -> None:
             _PENDING_OPENAI_DEVICE_LOGINS.pop(key, None)
 
 
-async def _stop_runtimes(request: Request, *, shared: bool) -> None:
+async def _stop_runtimes(
+    request: Request, *, shared: bool, owner_only: bool = False
+) -> None:
     registry = getattr(request.app.state, "conversation_registry", None)
     provisioning = getattr(registry, "provisioning", None)
     if provisioning is None:
@@ -136,7 +143,9 @@ async def _stop_runtimes(request: Request, *, shared: bool) -> None:
             conversation_id = UUID(hex=path.stem)
             identity = provisioning.load_optional(conversation_id)
             matches = identity and (
-                identity.shared_auth
+                identity.auth_owner == owner
+                if owner_only
+                else identity.shared_auth
                 if shared
                 else identity.auth_owner == owner and not identity.shared_auth
             )
@@ -220,6 +229,17 @@ async def get_openai_subscription_status(
     user_sub(request)
     shared = is_admin(request)
     auth = _get_openai_subscription_auth(auth_dir(request, shared))
+    shared_connected = False
+    if shared:
+        shared_connected = _status_from_auth(auth).connected
+    elif can_use_shared(request):
+        shared_auth = _get_openai_subscription_auth(auth_dir(request, True))
+        try:
+            await shared_auth.refresh_if_needed()
+        except (RuntimeError, httpx.HTTPError):
+            shared_connected = False
+        else:
+            shared_connected = _status_from_auth(shared_auth).connected
     try:
         await auth.refresh_if_needed()
     except (RuntimeError, httpx.HTTPError):
@@ -231,12 +251,18 @@ async def get_openai_subscription_status(
                 is_admin(request)
                 or user_sub(request) in shared_grants(request.app.state.config)
             ),
+            credential_source=credential_source(request),
+            shared_connected=shared_connected,
         )
+    if shared:
+        shared_connected = _status_from_auth(auth).connected
     result = _status_from_auth(auth)
     return result.model_copy(
         update={
             "shared_available": is_admin(request)
-            or user_sub(request) in shared_grants(request.app.state.config)
+            or user_sub(request) in shared_grants(request.app.state.config),
+            "credential_source": credential_source(request),
+            "shared_connected": shared_connected,
         }
     )
 
@@ -360,6 +386,19 @@ async def logout_openai_subscription(
 class SharedGrantRequest(BaseModel):
     sub: str = Field(min_length=1, max_length=512)
     enabled: bool
+
+
+class CredentialSourceRequest(BaseModel):
+    source: str
+
+
+@llm_router.post("/subscription/openai/source")
+async def update_openai_credential_source(
+    body: CredentialSourceRequest, request: Request
+) -> dict[str, str]:
+    set_credential_source(request, body.source)
+    await _stop_runtimes(request, shared=False, owner_only=True)
+    return {"source": credential_source(request)}
 
 
 @llm_router.get("/subscription/openai/grants")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from fastapi import HTTPException, Request, status
@@ -47,6 +49,50 @@ def personal_auth_dir(request: Request) -> Path:
     if owner is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "OIDC login required")
     return request.app.state.config.conversations_path.parent / "users" / owner / "auth"
+
+
+def credential_source(request: Request) -> str:
+    if is_admin(request):
+        return "shared"
+    owner = oidc_owner(request)
+    if owner is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "OIDC login required")
+    root = request.app.state.config.conversations_path.parent / "users" / owner
+    preference = root / "chatgpt-source"
+    if preference.is_file() and preference.read_text().strip() == "shared":
+        return "shared" if can_use_shared(request) else "personal"
+    if can_use_shared(request) and not (root / "auth" / "openai_oauth.json").is_file():
+        return "shared"
+    return "personal"
+
+
+def set_credential_source(request: Request, source: str) -> None:
+    if source not in {"personal", "shared"}:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid credential source"
+        )
+    if source == "shared" and not can_use_shared(request):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "Shared ChatGPT access is not enabled"
+        )
+    owner = oidc_owner(request)
+    if owner is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "OIDC login required")
+    root = request.app.state.config.conversations_path.parent / "users" / owner
+    root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "User credential directory is unavailable"
+        )
+    root.chmod(0o700)
+    fd, temporary = tempfile.mkstemp(dir=root)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(source)
+        os.replace(temporary, root / "chatgpt-source")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def auth_dir(request: Request, shared: bool = False) -> Path:
