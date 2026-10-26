@@ -36,7 +36,7 @@ def _get_oauth_client(config: Config):
         server_metadata_url=(
             f"{config.oidc_issuer_url.rstrip('/')}/.well-known/openid-configuration"
         ),
-        client_kwargs={"scope": "openid profile email"},
+        client_kwargs={"scope": "openid profile email groups"},
     )
     return oauth.openhands
 
